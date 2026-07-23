@@ -306,7 +306,7 @@ The firmware embeds the prebuilt modules, so there is nothing to copy onto
 the board. Over the console:
 
 ```
-xipfs_test              the full suite -- 76 tests, several minutes
+xipfs_test              the full suite -- 82 tests, several minutes
 xipfs_test fdpic        just the module loading tests, ~20 s
 
 nxflatxip               a module, two concurrent instances
@@ -399,10 +399,30 @@ nuttx_fdpic_module(hello hello.c)
 
 ### Two things worth knowing
 
-**Callbacks into your code work.** `qsort()` runs in the firmware and calls
-back into your comparison function. That requires the firmware to reserve
-r9, which `CONFIG_FDPIC=y` arranges centrally. If callbacks misbehave, check
-that first.
+**Callbacks into your code work — but only through entry points that were
+taught to expect them.**
+
+In FDPIC a function pointer is the address of a two-word *descriptor* living
+in your module's writable segment, not a code address. Firmware that stores
+one and later branches to it therefore jumps into RAM data. Each entry point
+has to resolve the descriptor first, and that is done by hand, per function.
+
+Safe to hand a module function to:
+
+`qsort` · `bsearch` · `pthread_create` · `signal` · `task_create`
+
+**Not safe** — these will fault the board:
+
+`sigaction` · `pthread_once` · `task_spawn` · `scandir` · `mq_notify`
+
+There is no diagnostic. The module loads, runs, and dies the moment the
+firmware branches to the descriptor — a HardFault with a dead console. If
+you need one of the unsupported ones, add `fdpic_callback()` at that entry
+point in the firmware; see `libs/libc/signal/sig_signal.c` for the pattern,
+including why the `SIG_*` sentinels have to be excluded by hand.
+
+This all also requires the firmware to reserve r9, which `CONFIG_FDPIC=y`
+arranges centrally. If callbacks misbehave, check that first.
 
 **Each instance gets its own data.** Two concurrent instances have separate
 globals while sharing one copy of the code in flash. `examples/qsorter`
