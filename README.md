@@ -512,6 +512,15 @@ make exports NUTTX_DIR=/path/to/nuttx   # count
 sdk/tools/nuttx-exports /path/to/nuttx  # the list
 ```
 
+The list comes from `libs/libc/exec_symtab.c`, **run through the C
+preprocessor**. That matters more than it sounds: NuttX generates that file
+from CSVs and puts most entries behind `#if defined(CONFIG_...)`, so reading
+it textually offers every symbol that *could* be exported rather than the
+ones that were — on one ordinary configuration, 127 names that were not in
+the firmware at all, `dlopen` and the socket calls among them. The guards
+are resolved with the same compiler that built the tree, which is why a
+configured **and built** tree is required.
+
 ---
 
 ## Reference
