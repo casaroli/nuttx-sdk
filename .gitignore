@@ -1,0 +1,9 @@
+# Build artifacts from the examples
+*.o
+*.fdpic
+*.so
+.nuttx-exports
+
+# Toolchain build trees, if anyone points them here
+/toolchain/build/
+/toolchain/src/

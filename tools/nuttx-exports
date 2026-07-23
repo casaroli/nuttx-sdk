@@ -1,0 +1,21 @@
+#!/bin/sh
+# Print the symbols the firmware exports to modules, one per line.
+#
+# A module links with -shared, so undefined symbols are permitted and the
+# link succeeds even for a symbol the firmware does not provide.  The
+# failure then surfaces at load time as a bare -ENOENT.  This list is what
+# lets that be caught at build time instead.
+#
+# Usage: nuttx-exports <nuttx-dir>
+
+set -e
+NUTTX="${1:?usage: nuttx-exports <nuttx-dir>}"
+SYMTAB="$NUTTX/libs/libc/exec_symtab.c"
+
+if [ ! -f "$SYMTAB" ]; then
+    echo "nuttx-exports: $SYMTAB not found." >&2
+    echo "  Build NuttX with CONFIG_EXECFUNCS_SYSTEM_SYMTAB=y first." >&2
+    exit 1
+fi
+
+sed -n 's/^[[:space:]]*{[[:space:]]*"\([^"]*\)".*/\1/p' "$SYMTAB" | sort -u
