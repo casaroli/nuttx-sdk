@@ -22,7 +22,25 @@
 # failure then surfaces at load time as a bare -ENOENT.  This list is what
 # lets that be caught at build time instead.
 #
+# Two sources have to agree, and using either alone gets it wrong:
+#
+#   * exec_symtab.c lists every symbol that *could* be exported, but most
+#     entries sit behind #if defined(CONFIG_...).  Reading it textually
+#     offers symbols the firmware was not built with -- on one ordinary
+#     configuration that was 127 of 668, including dlopen, the socket calls
+#     and crc32.  A module importing one of those passed verification and
+#     then failed to load, which is precisely the failure this exists to
+#     prevent.
+#
+#   * the linked binary contains thousands of symbols that are not exported
+#     to modules at all.
+#
+# A symbol is importable only if it is in both: named in the table, and
+# actually present in the firmware that was built.
+#
 # Usage: nuttx-exports <nuttx-dir>
+#
+# NM may be set to override the nm used to read the firmware.
 
 set -e
 NUTTX="${1:?usage: nuttx-exports <nuttx-dir>}"
@@ -34,4 +52,45 @@ if [ ! -f "$SYMTAB" ]; then
     exit 1
 fi
 
-sed -n 's/^[[:space:]]*{[[:space:]]*"\([^"]*\)".*/\1/p' "$SYMTAB" | sort -u
+ELF=
+for candidate in "$NUTTX/nuttx" "$NUTTX/nuttx.elf"; do
+    if [ -f "$candidate" ]; then
+        ELF="$candidate"
+        break
+    fi
+done
+
+if [ -z "$ELF" ]; then
+    echo "nuttx-exports: no linked firmware found in $NUTTX." >&2
+    echo "  Looked for nuttx and nuttx.elf.  A *built* tree is required:" >&2
+    echo "  the guards in exec_symtab.c cannot be resolved without one," >&2
+    echo "  and the list would offer symbols the firmware does not have." >&2
+    exit 1
+fi
+
+if [ -z "$NM" ]; then
+    for candidate in arm-none-eabi-nm nm; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            NM="$candidate"
+            break
+        fi
+    done
+fi
+
+if [ -z "$NM" ]; then
+    echo "nuttx-exports: no nm found; set NM to one that reads $ELF." >&2
+    exit 1
+fi
+
+named=$(sed -n 's/^[[:space:]]*{[[:space:]]*"\([^"]*\)".*/\1/p' "$SYMTAB" \
+        | sort -u)
+present=$("$NM" "$ELF" | awk 'NF >= 3 { print $3 }' | sort -u)
+
+printf '%s\n' "$named" > "${TMPDIR:-/tmp}/nuttx-exports-named.$$"
+printf '%s\n' "$present" > "${TMPDIR:-/tmp}/nuttx-exports-present.$$"
+
+comm -12 "${TMPDIR:-/tmp}/nuttx-exports-named.$$" \
+         "${TMPDIR:-/tmp}/nuttx-exports-present.$$"
+
+rm -f "${TMPDIR:-/tmp}/nuttx-exports-named.$$" \
+      "${TMPDIR:-/tmp}/nuttx-exports-present.$$"
