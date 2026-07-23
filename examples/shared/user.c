@@ -18,6 +18,12 @@
 
 /* Uses libcounter.so.  Two instances run concurrently: if the library's
  * data were shared between them the totals would interleave.
+ *
+ * libcounter is also a *leaf* library -- it calls nothing outside itself,
+ * so it has no PLT and therefore no DT_PLTGOT.  The loader has to fall back
+ * to PT_DYNAMIC vaddr + memsz to find its GOT.  If that fallback is wrong
+ * the library cannot reach its own globals, which is exactly what the total
+ * below would expose.
  */
 
 #include <stdlib.h>
@@ -38,7 +44,13 @@ int main(int argc, char *argv[])
       usleep(100000);
     }
 
-  syslog(LOG_INFO, "[user %d] library total = %d (expected %d)\n",
-         seed, counter_total(), seed * 3);
-  return 0;
+  syslog(LOG_INFO, "[user %d] library total = %d (expected %d) -- %s\n",
+         seed, counter_total(), seed * 3,
+         counter_total() == seed * 3 ? "PASS" : "FAIL");
+
+  /* Reported through the exit status as well as the log, so a test can
+   * assert on it rather than a human reading the console.
+   */
+
+  return counter_total() == seed * 3 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

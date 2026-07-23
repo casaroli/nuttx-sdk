@@ -306,7 +306,7 @@ The firmware embeds the prebuilt modules, so there is nothing to copy onto
 the board. Over the console:
 
 ```
-xipfs_test              the full suite -- 71 tests, several minutes
+xipfs_test              the full suite -- 76 tests, several minutes
 xipfs_test fdpic        just the module loading tests, ~20 s
 
 nxflatxip               a module, two concurrent instances
@@ -323,6 +323,8 @@ nxflatxip bench         XIP read throughput before and after a flash write
 -- FDPIC modules --
   PASS  descriptors manufactured by the loader are callable
   PASS  a module bound entirely through DT_JMPREL runs
+  PASS  a module without the FDPIC marker is refused
+  PASS  a leaf library with no DT_PLTGOT reaches its own data
   PASS  one flash copy of the library, pinned once per instance
   PASS  the module's own global constructor ran
   PASS  the library's global constructor ran
@@ -331,6 +333,18 @@ nxflatxip bench         XIP read throughput before and after a flash write
   PASS  destructors ran on unload, each with its instance's own state
   PASS  the library's pins return to zero once both instances are gone
 ```
+
+These assert on properties that otherwise fail *silently* — a loader that
+skips `DT_INIT_ARRAY` runs a C++ module perfectly happily with every global
+left as zero. They have been checked against deliberate one-line breakages
+of the loader, and each one fails when the thing it names is broken.
+
+> **A run that stops without printing its summary is a failure, not a
+> hang.** Two of these tests call into a module whose relocations must be
+> right; if they are not, the module branches to an unrelocated address and
+> the resulting HardFault takes the whole system down mid-test. That is
+> inherent — on Cortex-M a HardFault is system-wide, not per-task — so those
+> regressions show up as a dead console rather than a `FAIL` line.
 
 ---
 
