@@ -348,6 +348,77 @@ of the loader, and each one fails when the thing it names is broken.
 
 ---
 
+## Getting a module onto the target
+
+The examples above are embedded in the firmware, which is fine for a demo
+and useless for developing a module: every edit costs a full rebuild and
+reflash. The filesystem does not need that. A receiver doing plain
+`open`/`write`/`close` is all it takes, and both zmodem and ymodem work over
+the console UART already in use.
+
+Enable one of them in the firmware:
+
+```sh
+# zmodem: rz
+kconfig-tweak --file .config --enable CONFIG_SYSTEM_ZMODEM
+kconfig-tweak --file .config --set-str CONFIG_SYSTEM_ZMODEM_MOUNTPOINT "/mnt/xipfs"
+kconfig-tweak --file .config --disable CONFIG_DISABLE_POSIX_TIMERS
+
+# or ymodem: rb
+kconfig-tweak --file .config --enable CONFIG_SYSTEM_YMODEM
+
+# both need these
+kconfig-tweak --file .config --enable CONFIG_SERIAL_TERMIOS
+kconfig-tweak --file .config --enable CONFIG_NSH_FILE_APPS
+kconfig-tweak --file .config --set-val CONFIG_UART0_RXBUFSIZE 4096
+```
+
+Then, on the host:
+
+```sh
+# ymodem -- the host tool ships with NuttX and starts rb itself
+./apps/system/ymodem/sbrb.py -t /dev/cu.usbmodemXXXX -b 115200 \
+    -s /mnt/xipfs hello.fdpic
+
+# zmodem -- start rz on the target, then send with lrzsz
+sz -L 256 -l 256 -w 256 --binary hello.fdpic < $PORT > $PORT
+```
+
+Then run it by path, as above. Overwriting an existing module works, so the
+loop is edit, build, send, run.
+
+### Four settings that are not optional
+
+**`CONFIG_SERIAL_TERMIOS`.** A console is registered with `OPOST | ONLCR`,
+`ICRNL` and `ICANON | ECHO`, and the serial driver honours those regardless
+of this setting. Both receivers call `cfmakeraw()` to clear them, but
+`tcsetattr` is compiled out without it, so the call silently does nothing
+and the console mangles every binary frame. The symptom is a transfer that
+completes its ASCII handshake and then dies at the first binary header.
+
+**`CONFIG_DISABLE_POSIX_TIMERS` off, for zmodem only.** `zm_watchdog.c`
+calls `timer_create`; zmodem's Kconfig does not declare the dependency, so
+it fails at link rather than at configure. ymodem does not need it.
+
+**`CONFIG_NSH_FILE_APPS`.** Without it NSH never hands a bare path to
+binfmt, and a module you just transferred reports `command not found` —
+which looks like a loader failure and is not one.
+
+**The zmodem window, `-w`.** The console has no hardware flow control.
+`-L`/`-l` keep a subpacket inside the receiver's `PKTBUFSIZE` (512, or the
+receiver aborts with `-ENOSPC` from `zm_data()`), but only `-w` makes the
+sender wait for an ACK. Without it a transfer stalls at exactly
+`CONFIG_UART0_RXBUFSIZE` bytes once the target starts programming flash with
+interrupts off. A file smaller than that buffer succeeds anyway, which makes
+the setting look unnecessary until a larger module fails.
+
+ymodem needs none of that — it acknowledges every packet by design, and its
+`sbrb.py` drives the port directly. zmodem is the faster of the two in
+principle but wants `sz` handed a pty rather than the tty via shell
+redirection; `< $PORT > $PORT` fails at the `ZFILE` stage.
+
+---
+
 ## Writing a module
 
 A module is a normal C program. It links against nothing: `printf`,
@@ -382,8 +453,14 @@ $ make NUTTX_DIR=/path/to/nuttx
 OK    hello.fdpic: FDPIC, entry 0x1dd, 1 imports resolved
 ```
 
-Copy `hello.fdpic` onto the target's XIPFS mount and run it by path, with
-`posix_spawn`, `exec`, or from NSH.
+Put `hello.fdpic` onto the target's XIPFS mount (see
+[Getting a module onto the target](#getting-a-module-onto-the-target)) and
+run it by path, with `posix_spawn`, `exec`, or from NSH:
+
+```
+nsh> /mnt/xipfs/hello.fdpic
+hello from an FDPIC module, argc=1
+```
 
 CMake works too:
 
@@ -407,21 +484,28 @@ in your module's writable segment, not a code address. Firmware that stores
 one and later branches to it therefore jumps into RAM data. Each entry point
 has to resolve the descriptor first, and that is done by hand, per function.
 
-Safe to hand a module function to:
+Every firmware entry point a module can hand its own function to resolves
+the descriptor, so all of these are safe:
 
-`qsort` · `bsearch` · `pthread_create` · `signal` · `task_create`
+`qsort` · `bsearch` · `pthread_create` · `signal` · `sigaction` ·
+`task_create` · `task_spawn` · `pthread_once` · `scandir` ·
+`mq_notify` / `timer_create` with `SIGEV_THREAD`
 
-**Not safe** — these will fault the board:
+Two are worth knowing about. `scandir` resolves its **filter** but not its
+comparison function, which it hands to `qsort` (already resolved) --
+resolving twice would fault. And `mq_notify`/`timer_create` `SIGEV_THREAD`
+run the callback on a shared work-queue thread that carries no module data
+base; the firmware captures the base at registration and installs it around
+the call, so the callback still reaches your globals. (`SIGEV_SIGNAL` with a
+`sigaction` handler also works, and is simpler when a signal will do.)
 
-`sigaction` · `pthread_once` · `task_spawn` · `scandir` · `mq_notify`
+If you add a *new* firmware entry point that takes a module callback, it
+must resolve the descriptor by hand: see `libs/libc/signal/sig_signal.c` and
+`sched/signal/sig_action.c` for the pattern, including why the `SIG_*`
+sentinels are excluded and why the resolution belongs at the innermost
+common routine, not a wrapper that forwards to another resolver.
 
-There is no diagnostic. The module loads, runs, and dies the moment the
-firmware branches to the descriptor — a HardFault with a dead console. If
-you need one of the unsupported ones, add `fdpic_callback()` at that entry
-point in the firmware; see `libs/libc/signal/sig_signal.c` for the pattern,
-including why the `SIG_*` sentinels have to be excluded by hand.
-
-This all also requires the firmware to reserve r9, which `CONFIG_FDPIC=y`
+This all requires the firmware to reserve r9, which `CONFIG_FDPIC=y`
 arranges centrally. If callbacks misbehave, check that first.
 
 **Each instance gets its own data.** Two concurrent instances have separate
@@ -577,7 +661,7 @@ noticed on someone's board.
 | `SRCS` / `CXXSRCS` | | C and C++ sources |
 | `LIBS` | | Shared libraries to link against |
 | `ENTRY` | `main` | Entry symbol; `0` for a library |
-| `CPU` | `cortex-m33` | `-mcpu=` |
+| `CPU` | `cortex-m33` | `-mcpu=`. Use `cortex-m3` for a v7-M baseline that runs unchanged on M3/M4/M7/M33 -- one build for several targets |
 | `OPT` | `-Os` | |
 | `ARM_TOOLCHAIN` | `arm-none-eabi` | Compiler prefix |
 | `FDPIC_TOOLCHAIN` | `arm-uclinuxfdpiceabi` | Binutils prefix |
